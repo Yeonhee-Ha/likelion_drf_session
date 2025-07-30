@@ -1,7 +1,11 @@
 from django.shortcuts import render
 
+import re
+
+from rest_framework import viewsets, mixins
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
+from rest_framework.permissions import IsAuthenticated
 
 from .models import *
 from .serializers import *
@@ -10,63 +14,44 @@ from django.shortcuts import get_object_or_404
 
 # Create your views here.
 
-@api_view(['GET', 'POST'])
-def movie_list_create(request):
-    if request.method == 'GET':
-        movies = Movie.objects.all()
-        serializer = MovieSerializer(movies, many = True)
-        return Response(data = serializer.data)
+class MovieViewSet(viewsets.ModelViewSet):
+    queryset = Movie.objects.all()
     
-    if request.method == 'POST':
-        serializer = MovieSerializer(data = request.data)
-        if serializer.is_valid(raise_exception = True):
-            movie = serializer.save()
-            content = request.data['content']
-            tags = [words[1:] for words in content.split(' ') if words.startswith('#')]
-            for t in tags:
-                try:
-                    tag = get_object_or_404(Tag, name =t)
-                except:
-                    tag = Tag(name = t)
-                    tag.save()
-                movie.tags.add(tag)
-            movie.save()
-            
-            return Response(data = MovieSerializer(movie).data)
+    def get_serializer_class(self):
+        if self.action == "list":
+            return MovieListSerializer
+        return MovieSerializer
     
-    
-@api_view(['GET', 'PATCH', 'DELETE'])
-def movie_detail_update_delete(request, movie_id):
-    movie = get_object_or_404(Movie, id=movie_id)
-
-    if request.method == 'GET':
-        serializer = MovieSerializer(movie)
+    def create(self, request):
+        serializer = self.get_serializer(data = request.data)
+        serializer.is_valid(raise_exception = True)
+        self.perform_create(serializer)
+        
+        movie = serializer.instance
+        self.handle_tags(movie)
+        
         return Response(serializer.data)
+    
+    def perform_update(self, serializer):
+        movie = serializer.save()
+        movie.tags.clear()
+        self.handle_tags(movie)
+        
+    def handle_tags(self, movie):
+        words = re.split(r'[\s,]+', movie.content.strip())
+        tag_list = []
+        
+        for w in words:
+            if len(w) > 0:
+                if w[0] == '#':
+                    tag_list.append(w[1:])
+        for t in tag_list:
+            tag, _ = Tag.objects.get_or_create(name=t)
+            movie.tags.add(tag)
+        movie.save()
 
-    elif request.method == 'PATCH':
-        serializer = MovieSerializer(instance=movie, data=request.data, partial=True)
-        if serializer.is_valid():
-            movie = serializer.save()
-            movie.tags.clear()
-            content = request.data.get("content")
-            tags = [words[1:] for words in content.split(' ') if words.startswith('#')]
-            for t in tags:
-                try:
-                    tag = get_object_or_404(Tag, name=t)
-                except:
-                    tag = Tag(name=t)
-                    tag.save()
-                movie.tags.add(tag)  # ← 필드명도 반드시 .tags 로!
-            movie.save()
 
-        return Response(data=MovieSerializer(movie).data)
-            
-    elif request.method == 'DELETE':
-        movie.delete()
-        data = {
-            'deleted_movie': movie_id
-        }
-        return Response(data)
+    
 
 
 
@@ -95,3 +80,49 @@ def find_tag(request, tags_name):
         movie = Movie.objects.filter(tags__in = [tags])
         serializers= MovieSerializer(movie, many = True)
         return Response(data = serializers.data)
+    
+
+class CommentViewSet(viewsets.GenericViewSet, mixins.RetrieveModelMixin, mixins.UpdateModelMixin, mixins.DestroyModelMixin):
+    queryset = Comment.objects.all()
+    serializer_class = CommentSerializer
+    
+    
+
+class MovieCommentViewSet(viewsets.GenericViewSet, mixins.ListModelMixin, mixins.CreateModelMixin):
+    #queryset = Comment.objects.all()
+    serializer_class = CommentSerializer
+    permission_classes = [IsAuthenticated]
+    
+    def get_queryset(self):
+        movie = self.kwargs.get("movie_id")
+        queryset = Comment.objects.filter(movie_id = movie)
+        return queryset
+    
+    #def list(self, request, movie_id = None):
+    #    movie = get_object_or_404(Movie, id = movie_id)
+    #    queryset = self.filter_queryset(self.get_queryset().filter(movie = movie))
+    #    serializer = self.get_serializer(queryset, many=True)
+    #    return Response(serializer.data)
+    
+
+    def create(self, request, movie_id = None):
+        movie = get_object_or_404(Movie, id=movie_id)
+        serializer = self.get_serializer(data = request.data)
+        serializer.is_valid(raise_exception = True)
+        serializer.save(movie=movie)
+        return Response(serializer.data)
+    
+    
+    
+class TagViewSet(viewsets.GenericViewSet, mixins.RetrieveModelMixin):
+    queryset = Tag.objects.all()
+    serializer_class = TagSerializer
+    lookup_field = "name"
+    lookup_url_kwarg = "tag_name"
+    
+    def retrieve(self, request, *args, **kwargs):
+        tag_name = kwargs.get("tag_name")
+        tags = get_object_or_404(Tag, name = tag_name)
+        movies = Movie.objects.filter(tags = tags)
+        serializer = MovieSerializer(movies, many = True)
+        return Response(serializer.data)
